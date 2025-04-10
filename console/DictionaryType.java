@@ -1,3 +1,5 @@
 public enum DictionaryType {
-    ALPHA, DIGIT
+    ALPHA,
+    DIGIT,
+    BACKSPACE
 }
