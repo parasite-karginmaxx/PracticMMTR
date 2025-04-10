@@ -1,110 +1,93 @@
 package com.example.service;
 
-import com.example.DictionaryType;
-import com.example.util.WordValidator;
-import org.springframework.beans.factory.annotation.Value;
+import com.example.model.Dictionary;
+import com.example.model.DictionaryEntry;
+import com.example.repository.DictionaryRepository;
+import com.example.repository.DictionaryEntryRepository;
 import org.springframework.core.io.InputStreamResource;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 
-import jakarta.annotation.PostConstruct;
 import java.io.*;
 import java.nio.file.Files;
-import java.util.*;
+import java.util.List;
 
 @Service
 public class DictionaryService {
-    private final Map<DictionaryType, File> fileMap = new HashMap<>();
 
-    @Value("${dictionary.alpha.path:dictionary_alpha.txt}")
-    private String alphaPath;
+    private final DictionaryRepository dictionaryRepository;
+    private final DictionaryEntryRepository entryRepository;
 
-    @Value("${dictionary.digit.path:dictionary_digit.txt}")
-    private String digitPath;
-
-    @Value("${dictionary.backspace.path:dictionary_backspace.txt}")
-    private String backspacePath;
-
-    @PostConstruct
-    public void init() {
-        fileMap.put(DictionaryType.ALPHA, new File(alphaPath));
-        fileMap.put(DictionaryType.DIGIT, new File(digitPath));
-        fileMap.put(DictionaryType.BACKSPACE, new File(backspacePath));
+    public DictionaryService(DictionaryRepository dictionaryRepository, DictionaryEntryRepository entryRepository) {
+        this.dictionaryRepository = dictionaryRepository;
+        this.entryRepository = entryRepository;
     }
 
-    public boolean isValidKey(DictionaryType type, String key) {
-        return switch (type) {
-            case ALPHA -> WordValidator.isValidAlpha(key);
-            case DIGIT -> WordValidator.isValidDigit(key);
-            case BACKSPACE -> WordValidator.isValidBackspaceKey(key);
-        };
-    }
+    public void add(String dictionaryName, String key, String value) {
+        Dictionary dictionary = dictionaryRepository.findByNameAndDeletedFalse(dictionaryName)
+                .orElseThrow(() -> new IllegalArgumentException("Dictionary not found"));
 
-    public Map<String, String> load(DictionaryType type) throws IOException {
-        Map<String, String> map = new LinkedHashMap<>();
-        File file = fileMap.get(type);
-        if (!file.exists()) return map;
-        try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                String[] parts = line.split("=", 2);
-                if (parts.length == 2) {
-                    map.put(parts[0], parts[1]);
-                }
-            }
-        }
-        return map;
-    }
-
-    public void save(DictionaryType type, Map<String, String> map) throws IOException {
-        try (PrintWriter writer = new PrintWriter(new FileWriter(fileMap.get(type)))) {
-            for (var entry : map.entrySet()) {
-                writer.println(entry.getKey() + "=" + entry.getValue());
-            }
-        }
-    }
-
-    public void add(DictionaryType type, String key, String value) throws IOException {
-        Map<String, String> dict = load(type);
-
-        if (type == DictionaryType.BACKSPACE) {
-            String newProcessed = WordValidator.applyBackspace(key);
-            for (String existingKey : dict.keySet()) {
-                if (WordValidator.applyBackspace(existingKey).equals(newProcessed)) {
-                    throw new IllegalArgumentException("error.duplicate");
-                }
-            }
+        if (!key.matches(dictionary.getValidationRegex())) {
+            throw new IllegalArgumentException("Invalid key format");
         }
 
-        dict.put(key, value);
-        save(type, dict);
+        DictionaryEntry entry = DictionaryEntry.builder()
+                .dictionary(dictionary)
+                .key(key)
+                .value(value)
+                .build();
+
+        entryRepository.save(entry);
     }
 
-    public String find(DictionaryType type, String key) throws IOException {
-        return load(type).get(key);
+    public List<DictionaryEntry> find(String dictionaryName, String key) {
+        Dictionary dictionary = dictionaryRepository.findByNameAndDeletedFalse(dictionaryName)
+                .orElseThrow(() -> new IllegalArgumentException("Dictionary not found"));
+        return entryRepository.findAllByDictionaryAndKey(dictionary, key);
     }
 
-    public boolean delete(DictionaryType type, String key) throws IOException {
-        Map<String, String> dict = load(type);
-        if (dict.remove(key) != null) {
-            save(type, dict);
+    public boolean delete(String dictionaryName, String key) {
+        Dictionary dictionary = dictionaryRepository.findByNameAndDeletedFalse(dictionaryName)
+                .orElseThrow(() -> new IllegalArgumentException("Dictionary not found"));
+
+        List<DictionaryEntry> entries = entryRepository.findAllByDictionaryAndKey(dictionary, key);
+        if (!entries.isEmpty()) {
+            entryRepository.deleteAll(entries);
             return true;
         }
         return false;
     }
 
-    public List<Map.Entry<String, String>> getPage(DictionaryType type, int page, int size) throws IOException {
-        List<Map.Entry<String, String>> entries = new ArrayList<>(load(type).entrySet());
-        int from = Math.min((page - 1) * size, entries.size());
-        int to = Math.min(from + size, entries.size());
-        return entries.subList(from, to);
+    public Page<DictionaryEntry> getFilteredPage(String type, String key, String value, Pageable pageable) {
+        if (type != null && !"all".equalsIgnoreCase(type)) {
+            Dictionary dictionary = dictionaryRepository.findByNameAndDeletedFalse(type)
+                    .orElseThrow(() -> new IllegalArgumentException("Dictionary not found"));
+
+            if (key != null && !key.isEmpty()) {
+                return entryRepository.findByDictionaryAndKey(dictionary, key, pageable);
+            } else if (value != null && !value.isEmpty()) {
+                return entryRepository.findByDictionaryAndValueContainingIgnoreCase(dictionary, value, pageable);
+            } else {
+                return entryRepository.findByDictionary(dictionary, pageable);
+            }
+
+        } else {
+            return entryRepository.globalSearch(key, value, pageable);
+        }
     }
 
-    public InputStreamResource exportXml(DictionaryType type) throws IOException {
+    public InputStreamResource exportXml(String dictionaryName) throws IOException {
+        Dictionary dictionary = dictionaryRepository.findByNameAndDeletedFalse(dictionaryName)
+                .orElseThrow(() -> new IllegalArgumentException("Dictionary not found"));
+
+        List<DictionaryEntry> entries = entryRepository.findByDictionary(dictionary, Pageable.unpaged()).getContent();
+
         File temp = File.createTempFile("dictionary-", ".xml");
         try (PrintWriter writer = new PrintWriter(new FileWriter(temp))) {
             writer.println("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
-            writer.println("<dictionary>");
-            for (var entry : load(type).entrySet()) {
+            writer.println("<dictionary name=\"" + dictionaryName + "\">");
+            for (DictionaryEntry entry : entries) {
                 writer.println("  <entry>");
                 writer.printf("    <key>%s</key>%n", entry.getKey());
                 writer.printf("    <value>%s</value>%n", entry.getValue());
@@ -113,5 +96,11 @@ public class DictionaryService {
             writer.println("</dictionary>");
         }
         return new InputStreamResource(Files.newInputStream(temp.toPath()));
+    }
+
+    public String getRegexFor(String dictionaryName) {
+        Dictionary dictionary = dictionaryRepository.findByNameAndDeletedFalse(dictionaryName)
+                .orElseThrow(() -> new IllegalArgumentException("Dictionary not found"));
+        return dictionary.getValidationRegex();
     }
 }
